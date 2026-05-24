@@ -1,0 +1,263 @@
+#### Preamble ####
+# Author: Chloe Thierstein & Oriane Edwards
+# Contact: chloe.thierstein@utoronto.ca & oriane.edwards@mail.utoronto.ca
+# Date: 24 May 2026
+
+#### Workspace Setup ####
+library(tidyverse)
+library(openalexR)
+library(writexl)
+
+# Set email address for OpenAlex API requests
+options(openalexR.mailto = "example.email@email.com") 
+
+# Vector of OpenAlex author IDs to query. Replace these IDs with the authors relevant to your project
+author_ids <- c("A5008890170", "A5017732389", "A5069481060", "A5090770573", "A5030997252", "A5010226677", "A5049756907", "A5067649058", "A5071375346", "A5075691688", "A5044304537", "A5101845929", "A5067300342", "A5004509556", "A5059509835", "A5050634621", "A5037361495", "A5112797720", "A5014704682", "A5061539195", "A5068946700", "A5031800223", "A5000323477", "A5079974993", "A5030910036", "A5029356075", "A5085197846", "A5013824898", "A5065174143", "A5042285723", "A5041079016", "A5068908253", "A5101163871", "A5101916415", "A5111705605", "A5056334674", "A5108755384", "A5110166840", "A5081944430", "A5059058096", "A5087075439", "A5073446665", "A5041868236", "A5084932203", "A5002958494", "A5013232468", "A5051002562", "A5028995065", "A5057346145", "A5106433221", "A5056259955", "A5045578032", "A5070406629", "A5055479927", "A5069633513", "A5016241761", "A5021553989", "A5111766082", "A5078828786", "A5103090946", "A5077636774", "A5004707120", "A5058923571", "A5063307710", "A5061496507", "A5024138278", "A5058781407", "A5069512420", "A5065308697", "A5022943914", "A5078556999", "A5000072770")
+
+#### Function to Retrieve Works ####
+
+# Query OpenAlex for all journal articles associated with a given authorbetween 2019 and 2024
+get_works_by_author <- function(author_id) {
+  res <- oa_fetch(
+    entity = "works",
+    `author.id` = paste0("https://openalex.org/", author_id),
+    from_publication_date = "2019-01-01",
+    to_publication_date = "2024-12-31",
+    type = "article",
+    output = "list"
+  )
+# Return NULL if no publications are found
+  if (length(res) == 0) {
+    return(NULL)
+  } else {
+    return(res)
+  }
+}
+
+#### Retrieve Works for All Authors ####
+
+# Loop through each author ID and retrieve publication records
+author_works_list <- map(author_ids, function(aid) {
+  works <- get_works_by_author(aid)
+# Skip authors with no records
+  if (is.null(works) || length(works) == 0) {
+    return(NULL)
+  } else {
+    # Add queried author ID to each publication record. This preserves the original queried author after flattening
+    works_with_author <- map(works, function(w) {
+      w$queried_author_id <- aid
+      w
+    })
+    return(works_with_author)
+  }
+})
+
+# Remove NULL entries and flatten nested lists into a single list
+author_works_clean <- keep(author_works_list, ~ !is.null(.) && length(.) > 0)
+flat_data <- unlist(author_works_clean, recursive = FALSE)
+
+# Stop execution if no publication records were retrieved
+if (length(flat_data) == 0) stop("No records found.")
+
+#### Helper Functions ####
+
+# Custom null-coalescing operator. Returns 'a' if not NULL, otherwise returns 'b'
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+# Extract first author name from a publication record
+get_first_author <- function(record) {
+  if (length(record$authorships) > 0) {
+    record$authorships[[1]]$author$display_name %||% NA_character_
+  } else {
+    NA_character_
+  }
+}
+
+# Extract all author names and collapse into a semicolon-separated string
+get_all_authors <- function(record) {
+  if (length(record$authorships) > 0) {
+    names <- sapply(record$authorships, function(auth) auth$author$display_name %||% NA_character_)
+    paste(names, collapse = "; ")
+  } else {
+    NA_character_
+  }
+}
+
+# Extract corresponding author(s)
+get_corresponding_author <- function(record) {
+  if (length(record$authorships) > 0) {
+    names <- sapply(record$authorships, function(auth) {
+      if (!is.null(auth$is_corresponding) && auth$is_corresponding) {
+        auth$author$display_name %||% NA_character_
+      } else {
+        NA_character_
+      }
+    })
+    paste(na.omit(names), collapse = "; ")
+  } else {
+    NA_character_
+  }
+}
+
+# Extract publication date
+get_publication_date <- function(record) {
+  record$publication_date %||% NA_character_
+}
+
+# Extract article processing charge (APC) information
+get_apc <- function(record) {
+  if (!is.null(record$apc_list) && length(record$apc_list) > 0) {
+    list(
+      apc_value = record$apc_list$value %||% NA_real_,
+      apc_currency = record$apc_list$currency %||% NA_character_,
+      apc_value_usd = record$apc_list$value_usd %||% NA_real_
+    )
+  } else {
+    list(apc_value = NA_real_, apc_currency = NA_character_, apc_value_usd = NA_real_)
+  }
+}
+
+# Extract grant and funding information
+get_grants <- function(record) {
+  if (!is.null(record$grants) && length(record$grants) > 0) {
+    funders <- sapply(record$grants, function(g) g$funder %||% NA_character_)
+    funder_names <- sapply(record$grants, function(g) g$funder_display_name %||% NA_character_)
+    award_ids <- sapply(record$grants, function(g) g$award_id %||% NA_character_)
+    list(
+      grants_funder = paste(funders, collapse = "; "),
+      grants_funder_display_name = paste(funder_names, collapse = "; "),
+      grants_award_id = paste(award_ids, collapse = "; ")
+    )
+  } else {
+    list(grants_funder = NA_character_, grants_funder_display_name = NA_character_, grants_award_id = NA_character_)
+  }
+}
+
+# Extract open access information
+get_open_access <- function(record) {
+  oa <- record$open_access
+  if (!is.null(oa)) {
+    list(
+      openaccess_is_oa = oa$is_oa %||% NA,
+      openaccess_oa_status = oa$oa_status %||% NA_character_,
+      openaccess_oa_url = oa$oa_url %||% NA_character_,
+      openaccess_any_repository_has_fulltext = oa$any_repository_has_fulltext %||% NA
+    )
+  } else {
+    list(
+      openaccess_is_oa = NA,
+      openaccess_oa_status = NA_character_,
+      openaccess_oa_url = NA_character_,
+      openaccess_any_repository_has_fulltext = NA
+    )
+  }
+}
+
+# Extract ISSN values for the journal/source
+get_issn <- function(record) {
+  issn_vec <- record$primary_location$source$issn
+  if (is.null(issn_vec)) {
+    list(issn_1 = NA_character_, issn_2 = NA_character_)
+  } else if (length(issn_vec) == 1) {
+    list(issn_1 = issn_vec[[1]] %||% NA_character_, issn_2 = NA_character_)
+  } else if (length(issn_vec) >= 2) {
+    list(issn_1 = issn_vec[[1]] %||% NA_character_, issn_2 = issn_vec[[2]] %||% NA_character_)
+  } else {
+    list(issn_1 = NA_character_, issn_2 = NA_character_)
+  }
+}
+
+# Extract publication license information
+get_license <- function(record) {
+  lic <- record$primary_location$license
+  lic %||% NA_character_
+}
+
+# Extract publisher hierarchy information
+get_publisher <- function(record) {
+  lineage <- record$primary_location$source$host_organization_lineage_names
+  if (is.null(lineage)) {
+    list(division = NA_character_, publisher = NA_character_)
+  } else if (length(lineage) == 1) {
+    list(division = lineage[[1]] %||% NA_character_, publisher = NA_character_)
+  } else if (length(lineage) >= 2) {
+    list(division = lineage[[1]] %||% NA_character_, publisher = lineage[[2]] %||% NA_character_)
+  } else {
+    list(division = NA_character_, publisher = NA_character_)
+  }
+}
+
+# Extract bibliographic details
+get_biblio <- function(record) {
+  bib <- record$biblio
+  if (!is.null(bib)) {
+    list(
+      volume = bib$volume %||% NA_character_,
+      issue = bib$issue %||% NA_character_,
+      first_page = bib$first_page %||% NA_character_,
+      last_page = bib$last_page %||% NA_character_
+    )
+  } else {
+    list(volume = NA_character_, issue = NA_character_, first_page = NA_character_, last_page = NA_character_)
+  }
+}
+
+#### Create Final Data Table ####
+
+# Convert publication records into a structured tibble
+final_table <- tibble(
+  author_id = sapply(flat_data, function(x) x$queried_author_id %||% NA_character_),
+  id = sapply(flat_data, function(x) x$id %||% NA_character_),
+  title = sapply(flat_data, function(x) x$title %||% NA_character_),
+  first_author = sapply(flat_data, get_first_author),
+  all_authors = sapply(flat_data, get_all_authors),
+  corresponding_author = sapply(flat_data, get_corresponding_author),
+  publication_date = sapply(flat_data, get_publication_date),
+  publication_year = sapply(flat_data, function(x) x$publication_year %||% NA_integer_),
+  doi = sapply(flat_data, function(x) x$doi %||% NA_character_),
+  language = sapply(flat_data, function(x) x$language %||% NA_character_),
+  cited_by_count = sapply(flat_data, function(x) x$cited_by_count %||% NA_integer_),
+  fwci = sapply(flat_data, function(x) x$fwci %||% NA_real_),
+  type = sapply(flat_data, function(x) x$type %||% NA_character_),
+  apc_value = sapply(flat_data, function(x) get_apc(x)$apc_value),
+  apc_currency = sapply(flat_data, function(x) get_apc(x)$apc_currency),
+  apc_value_usd = sapply(flat_data, function(x) get_apc(x)$apc_value_usd),
+  grants_funder = sapply(flat_data, function(x) get_grants(x)$grants_funder),
+  grants_funder_display_name = sapply(flat_data, function(x) get_grants(x)$grants_funder_display_name),
+  grants_award_id = sapply(flat_data, function(x) get_grants(x)$grants_award_id),
+  openaccess_is_oa = sapply(flat_data, function(x) get_open_access(x)$openaccess_is_oa),
+  openaccess_oa_status = sapply(flat_data, function(x) get_open_access(x)$openaccess_oa_status),
+  openaccess_oa_url = sapply(flat_data, function(x) get_open_access(x)$openaccess_oa_url),
+  openaccess_any_repository_has_fulltext = sapply(flat_data, function(x) get_open_access(x)$openaccess_any_repository_has_fulltext),
+  display_name = sapply(flat_data, function(x) x$primary_location$source$display_name %||% NA_character_),
+  division = sapply(flat_data, function(x) get_publisher(x)$division),
+  publisher = sapply(flat_data, function(x) get_publisher(x)$publisher),
+  issn_1 = sapply(flat_data, function(x) get_issn(x)$issn_1),
+  issn_2 = sapply(flat_data, function(x) get_issn(x)$issn_2),
+  volume = sapply(flat_data, function(x) get_biblio(x)$volume),
+  issue = sapply(flat_data, function(x) get_biblio(x)$issue),
+  first_page = sapply(flat_data, function(x) get_biblio(x)$first_page),
+  last_page = sapply(flat_data, function(x) get_biblio(x)$last_page),
+  license = sapply(flat_data, get_license)
+)
+
+# Replace author IDs and names for your context
+id_map_df <- tibble(
+  author_id = c("A5008890170", "A5017732389", "A5069481060", "A5090770573", "A5030997252", "A5010226677", "A5049756907", "A5067649058", "A5071375346", "A5075691688", "A5044304537", "A5101845929", "A5067300342", "A5004509556", "A5059509835", "A5050634621", "A5037361495", "A5112797720", "A5014704682", "A5061539195", "A5068946700", "A5031800223", "A5000323477", "A5079974993", "A5030910036", "A5029356075", "A5085197846", "A5013824898", "A5065174143", "A5042285723", "A5041079016", "A5068908253", "A5101163871", "A5101916415", "A5111705605", "A5056334674", "A5108755384", "A5110166840", "A5081944430", "A5059058096", "A5087075439", "A5073446665", "A5041868236", "A5084932203", "A5002958494", "A5013232468", "A5051002562", "A5028995065", "A5057346145", "A5106433221", "A5056259955", "A5045578032", "A5070406629", "A5055479927", "A5069633513", "A5016241761", "A5021553989", "A5111766082", "A5078828786", "A5103090946", "A5077636774", "A5004707120", "A5058923571", "A5063307710", "A5061496507", "A5024138278", "A5058781407", "A5069512420", "A5065308697", "A5022943914", "A5078556999", "A5000072770"),
+  scopus_id = c("57221380946", "7401615316", "24176635700", "6506226018", "12762309900", "37036790500", "6602913808", "6507726924", "6602787947", "57215873862", "35605390800", "57193903038", "6603596005", "13411181600", "26538633400", "57546380800", "36476986200", "6507181541", "7003891192", "6602764701", "35381356400", "6506206097", "7006662063", "9638830000", "56892755300", "6507923458", "57216630295", "6603801517", "57222571738", "6701857784", "7404395994", "7203001393", "13310313400", "57201084099", "6603548977", "9939833500", "56958052900", "7102957631", "7401939859", "7102890006", "7005015639", "55306889400", "57197451630", "20734348300", "34877080400", "7003702648", "7102820563", "19337345200", "55202362800", "6602869704", "7003272028", "6603054112", "6503966802", "26538890900", "8412685700", "22135907400", "7102804787", "7006593840", "6506530804", "7006098345", "9336260000", "23006478100", "7103173904", "55058645000", "7102674988", "7005156329", "7006135289", "49762152000", "57214090994", "57613876800", "57005893900", "26431665000"),
+  author_name = c("Anderson, Greg S.", "Andrews, Paul B.", "Arat, F. Emel", "Avivi-Arber, Limor", "Azarpazhooh, Amir", "Azizi, Natoosha", "Basrani, Bettina R.", "Blanas, Nick", "Bozec, L.", "Bubola, Justin", "Burgess, Karen L.", "Campbell, Karen M.", "Caminiti, Marco F.", "Carneiro, Karina M.M.", "Cash, Mindy", "Cassim, Nashat", "Chugh, Deepika", "Cherkas, Pavel S.", "Cvitkovitch, Dennis G.", "Daskalogiannakis, John", "Davies, John Edward", "Dempster, Laura J.", "Deporter, Douglas A.", "Dos Santos, Paulo Henrique", "Dosani, Fehmida Z.", "Finer, Yoav", "Franco Echevarria, Maria", "Ganss, Bernhard W.", "Gheorghe, Teodora Iunia", "Glogauer, Michael", "Goldberg, Michael Brian", "Gong, Siew Ging", "Haas, Daniel A.", "Huang, Bo", "Katsikeris, Nick F.", "Kishen, Anil", "Kim, Joowan", "Kulkarni, Gajanan Vishwanath", "Lai, Jim Yuan", "Lam, Ernest W.N.", "Lévesque, Céline Marie", "Macmillan, R. E.", "Macmillan, R. E. 2", "Magalhaes, Marco A.O.", "Malkhassian, Gevik", "Manolson, M. F.", "McCulloch, Christopher", "Mendes, Vanessa Cristina", "Moriarty, Tara J.", "Nkansah, Peter J.", "Nainar, S. M. Hashim", "Ouanounou, Aviv", "Perschbacher, Kristina A.", "Perschbacher, Susanne E.", "Posluns, James L.", "Prakki, Anuradha", "Rosenbloom, J.", "Santerre, J. Paul", "Sectakof, P. A.", "Sessle, Barry John", "Shokati, Babak", "Shrestha, Annie", "Simmons, Craig", "Singhal, Sonica", "Suri, Sunjay", "Tam, Laura Eva", "Tenenbaum, Howard Charles", "Tenn-Lyn, Nicole A.", "Thang, Trevor S.T.", "Watson, Erin", "Wong, Michelle", "Yarascavitch, Carilynne")
+)
+
+# Merge author metadata into final publication table
+final_table <- final_table %>%
+  left_join(id_map_df, by = "author_id")
+
+#### Export Results ####
+
+# Export final dataset to Excel workbook
+write_xlsx(final_table, "OpenAlex_Authors_2020_2024.xlsx")
+
+# Print confirmation message
+print("Data with author IDs exported to Excel successfully.")
+
+
