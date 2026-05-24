@@ -1,0 +1,308 @@
+#### Preamble ####
+# Author: Chloe Thierstein & Oriane Edwards
+# Contact: chloe.thierstein@utoronto.ca & oriane.edwards@mail.utoronto.ca
+# Date: 24 May 2026
+
+#### Workspace Setup ####
+
+# Load required libraries
+library(httr)
+library(jsonlite)
+library(openxlsx)
+
+#### Function to Extract JSON Data ####
+
+# Convert Scopus JSON records into a structured data frame
+extractJSON <- function(json_data) {
+  
+  df <- data.frame(
+    
+    # Extract Scopus EID
+    scopusID = sapply(json_data, function(x) 
+      ifelse(!is.null(x$eid), x$eid, NA)),
+    
+    # Extract DOI
+    doi = sapply(json_data, function(x) 
+      ifelse(!is.null(x$`prism:doi`), x$`prism:doi`, NA)),
+    
+    # Extract open access status
+    openaccess = sapply(json_data, function(x) 
+      ifelse(!is.null(x$openaccessFlag), x$openaccessFlag, NA)),
+    
+    # Extract all author names and combine into a semicolon-separated string
+    authors = sapply(json_data, function(x) {
+      if (!is.null(x$author)) {
+        paste(sapply(x$author, function(a) a$authname), collapse = "; ")
+      } else {
+        NA
+      }
+    }),
+    
+    # Extract author affiliations and remove duplicates
+    affiliations = sapply(json_data, function(x) {
+      if (!is.null(x$affiliation)) {
+        paste(unique(sapply(x$affiliation, function(a) a$affilname)), collapse = "; ")
+      } else {
+        NA
+      }
+    }),
+    
+    # Extract article title
+    title = sapply(json_data, function(x) 
+      ifelse(!is.null(x$`dc:title`), x$`dc:title`, NA)),
+    
+    # Extract journal title
+    journal = sapply(json_data, function(x) 
+      ifelse(!is.null(x$`prism:publicationName`), x$`prism:publicationName`, NA)),
+    
+    # Extract ISSN
+    issn = sapply(json_data, function(x) 
+      ifelse(!is.null(x$`prism:issn`), x$`prism:issn`, NA)),
+    
+    # Extract journal volume
+    volume = sapply(json_data, function(x) 
+      ifelse(!is.null(x$`prism:volume`), x$`prism:volume`, NA)),
+    
+    # Extract journal issue number
+    issue = sapply(json_data, function(x) 
+      ifelse(!is.null(x$`prism:issueIdentifier`), x$`prism:issueIdentifier`, NA)),
+    
+    # Extract article page range
+    page_range = sapply(json_data, function(x) 
+      ifelse(!is.null(x$`prism:pageRange`), x$`prism:pageRange`, NA)),
+    
+    # Extract citation count
+    citedby_count = sapply(json_data, function(x) 
+      ifelse(!is.null(x$`citedby-count`), x$`citedby-count`, NA)),
+    
+    # Extract publication subtype description
+    subtype = sapply(json_data, function(x) 
+      ifelse(!is.null(x$subtypeDescription), x$subtypeDescription, NA)),
+    
+    # Extract Scopus URL
+    url = sapply(json_data, function(x) 
+      ifelse(!is.null(x$link[[1]]$`@href`), x$link[[1]]$`@href`, NA)),
+    
+    # Extract publication year from cover date
+    year = sapply(json_data, function(x) 
+      ifelse(!is.null(x$`prism:coverDate`), substr(x$`prism:coverDate`, 1, 4), NA)),
+    
+    # Extract funding sponsor names
+    funding_sponsor = sapply(json_data, function(x) {
+      if (!is.null(x$`fund-sponsor`)) {
+        paste(unique(x$`fund-sponsor`), collapse = "; ")
+      } else {
+        NA
+      }
+    }),
+    
+    # Extract funding acronyms
+    funding_acronym = sapply(json_data, function(x) {
+      if (!is.null(x$`fund-acr`)) {
+        paste(unique(x$`fund-acr`), collapse = "; ")
+      } else {
+        NA
+      }
+    }),
+    
+    # Extract funding grant numbers
+    funding_number = sapply(json_data, function(x) {
+      if (!is.null(x$`fund-no`)) {
+        paste(unique(x$`fund-no`), collapse = "; ")
+      } else {
+        NA
+      }
+    }),
+    
+    # Extract full funding text
+    funding_text = sapply(json_data, function(x) {
+      if (!is.null(x$`funding-text`)) {
+        x$`funding-text`
+      } else {
+        NA
+      }
+    }),
+    
+    stringsAsFactors = FALSE
+  )
+  
+  # Return completed data frame
+  return(df)
+}
+
+#### Function to Search Scopus API ####
+
+# Query the Scopus API using offset pagination
+searchByString <- function(string, retMax = Inf) {
+  
+  # Add your Scopus API key
+  key <- "SCOPUS API KEY HERE"
+  
+  # Base URL for Scopus Search API
+  base_url <- "https://api.elsevier.com/content/search/scopus"
+  
+  # Pagination settings
+  start <- 0
+  count <- 25
+  
+  # Tracking variables
+  totalRetrieved <- 0
+  totalAvailable <- NA
+  all_results <- list()
+  page <- 1
+  
+  # Continue retrieving records until all available records are collected
+  repeat {
+    
+    cat(sprintf(
+      "\nFetching page %d (results %d to %d)\n",
+      page,
+      start + 1,
+      start + count
+    ))
+    
+    # Submit GET request to Scopus API
+    res <- GET(
+      url = base_url,
+      query = list(
+        query = string,
+        count = count,
+        start = start,
+        sort = "-coverDate",
+        view = "COMPLETE",
+        httpAccept = "application/json",
+        apiKey = key,
+        ver = "new"
+      ),
+      add_headers(
+        Accept = "application/json",
+        `X-ELS-APIKey` = key
+      )
+    )
+    
+    # Stop execution if request fails
+    stop_for_status(res)
+    
+    # Parse JSON response
+    parsed <- fromJSON(
+      content(res, "text", encoding = "UTF-8"),
+      flatten = TRUE
+    )
+    
+    # Extract total number of available records
+    if (is.na(totalAvailable)) {
+      totalAvailable <- as.integer(
+        parsed$`search-results`$`opensearch:totalResults`
+      )
+      cat("Total results available:", totalAvailable, "\n")
+    }
+    
+    # Extract entries from current page
+    entries <- parsed$`search-results`$entry
+    
+    # Stop if no entries are returned
+    if (is.null(entries)) {
+      cat("No more entries returned, stopping.\n")
+      break
+    }
+    
+    # Convert data frame entries into list format if needed
+    if (is.data.frame(entries)) {
+      entries <- split(entries, seq(nrow(entries)))
+    }
+    
+    # Append new entries to master results list
+    all_results <- c(all_results, entries)
+    
+    # Update retrieval count
+    totalRetrieved <- length(all_results)
+    
+    cat(sprintf(
+      "Retrieved so far: %d / %d\n",
+      totalRetrieved,
+      totalAvailable
+    ))
+    
+    # Update pagination variables
+    start <- start + count
+    page <- page + 1
+    
+    # Stop when all records or requested maximum have been retrieved
+    if (totalRetrieved >= totalAvailable ||
+        totalRetrieved >= retMax) {
+      cat("Reached total available or requested max. Stopping.\n")
+      break
+    }
+    
+    # Pause between requests to respect API rate limits
+    Sys.sleep(1)
+  }
+  
+  # Print completion message
+  cat(sprintf(
+    "\nDone. Total records retrieved: %d\n",
+    totalRetrieved
+  ))
+  
+  # Return all retrieved records
+  return(all_results)
+}
+
+#### Author IDs and Query Construction ####
+
+# Vector of Scopus Author IDs to query - change these for your context
+author_ids <- c(
+  "57221380946", "7401615316", "24176635700", "6506226018",
+  "12762309900", "37036790500", "6602913808", "6507726924",
+  "6602787947", "57215873862", "35605390800", "57193903038",
+  "6603596005", "13411181600", "26538633400", "57546380800",
+  "36476986200", "6507181541", "7003891192", "6602764701",
+  "35381356400", "6506206097", "7006662063", "9638830000",
+  "56892755300", "6507923458", "57216630295", "6603801517",
+  "57222571738", "6701857784", "7404395994", "7203001393",
+  "13310313400", "57201084099", "6603548977", "9939833500",
+  "56958052900", "7102957631", "7401939859", "7102890006",
+  "7005015639", "55306889400", "57197451630", "20734348300",
+  "34877080400", "7003702648", "7102820563", "19337345200",
+  "55202362800", "6602869704", "7003272028", "6603054112",
+  "6503966802", "26538890900", "8412685700", "22135907400",
+  "7102804787", "7006593840", "6506530804", "7006098345",
+  "9336260000", "23006478100", "7103173904", "55058645000",
+  "7102674988", "7005156329", "7006135289", "49762152000",
+  "57214090994", "57613876800", "57005893900", "26431665000"
+)
+
+# Build Scopus author search query
+authorQuery <- paste0(
+  "AU-ID(",
+  author_ids,
+  ")",
+  collapse = " OR "
+)
+
+# Restrict results to publications from 2020–2024
+myQuery <- paste0(
+  "(",
+  authorQuery,
+  ") AND PUBYEAR > 2019 AND PUBYEAR < 2025"
+)
+
+#### Retrieve Scopus Records ####
+
+# Query Scopus API and retrieve up to 1000 records
+results <- searchByString(myQuery, retMax = 1000)
+
+#### Extract and Export Results ####
+
+# Convert JSON records into a structured data frame
+df <- extractJSON(results)
+
+# Export final dataset to Excel workbook
+write.xlsx(
+  df,
+  file = "Scopus_Authors_2020_2024biggerpull.xlsx",
+  rowNames = FALSE
+)
+
+# Print confirmation message
+print("Scopus publication data exported successfully.")
