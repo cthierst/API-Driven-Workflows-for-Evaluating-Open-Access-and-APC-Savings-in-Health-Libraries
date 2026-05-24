@@ -1,0 +1,709 @@
+#### Preamble ####
+# Author: Chloe Thierstein & Oriane Edwards
+# Contact: chloe.thierstein@utoronto.ca & oriane.edwards@mail.utoronto.ca
+# Date: 24 May 2026
+
+#### Workspace Setup ####
+library(httr)
+library(XML)
+
+#### Function to Search Scopus by Search String ####
+
+# Search the Scopus database using a text query and retrieve XML records
+searchByString <- function(string,
+                           content = "complete",
+                           myStart = 0,
+                           retCount = 25,
+                           retMax = Inf,
+                           mySort = "-coverDate",
+                           cursor = "*",
+                           outfile) {
+
+  # Validate content type argument
+  if (!content %in% c("complete", "standard")) {
+    stop("Invalid content value. Valid content values are 'complete', and 'standard'")
+  }
+
+  # Add your Scopus API key
+  key <- "SCOPUS API KEY HERE"
+
+  print("Retrieving records.")
+
+  # Submit initial API request to Scopus
+  theURL <- httr::GET(
+    "https://api.elsevier.com/content/search/scopus",
+    query = list(
+      apiKey = key,
+      query = string,
+      sort = mySort,
+      httpAccept = "application/xml",
+      view = content,
+      count = retCount,
+      start = myStart,
+      cursor = cursor
+    )
+  )
+
+  # Stop execution if API request fails
+  httr::stop_for_status(theURL)
+
+  # Save XML response as text
+  theData <- httr::content(theURL, as = "text")
+
+  # Parse XML response
+  newData <- XML::xmlParse(theURL)
+
+  # Extract total number of matching records
+  resultCount <- as.numeric(
+    XML::xpathSApply(
+      newData,
+      "//opensearch:totalResults",
+      XML::xmlValue
+    )
+  )
+
+  # Extract cursor for paginated requests
+  cursor <- XML::xpathSApply(
+    newData,
+    "//cto:cursor",
+    XML::xmlGetAttr,
+    name = "next",
+    namespaces = "cto"
+  )
+
+  print(paste("Found", resultCount, "records."))
+
+  # Track number of records retrieved
+  retrievedCount <- retCount + myStart
+
+  #### Retrieve Additional Pages ####
+
+  # Continue retrieving results until all records are downloaded
+  while (resultCount > retrievedCount && retrievedCount < retMax) {
+
+    # Move to next page of results
+    myStart <- myStart + retCount
+
+    print(
+      paste(
+        "Retrieved",
+        retrievedCount,
+        "of",
+        resultCount,
+        "records. Getting more."
+      )
+    )
+
+    # Request additional records
+    theURL <- httr::GET(
+      "https://api.elsevier.com/content/search/scopus",
+      query = list(
+        apiKey = key,
+        query = string,
+        sort = mySort,
+        httpAccept = "application/xml",
+        view = content,
+        count = retCount,
+        cursor = cursor
+      )
+    )
+
+    # Append new XML text to existing data
+    theData <- paste(
+      theData,
+      httr::content(theURL, as = "text")
+    )
+
+    # Parse next XML page
+    newData <- XML::xmlParse(theURL)
+
+    # Update cursor for next request
+    cursor <- XML::xpathSApply(
+      newData,
+      "//cto:cursor",
+      XML::xmlGetAttr,
+      name = "next",
+      namespaces = "cto"
+    )
+
+    # Check for HTTP errors
+    if (httr::http_error(theURL) == TRUE) {
+
+      print("Encountered an HTTP error. Details follow.")
+      print(httr::http_status(theURL))
+
+      break
+    }
+
+    # Update retrieval count
+    retrievedCount <- retrievedCount + retCount
+
+    # Pause between API requests
+    Sys.sleep(1)
+  }
+
+  print(
+    paste(
+      "Retrieved",
+      retrievedCount,
+      "records. Formatting and saving results."
+    )
+  )
+
+  #### Format and Save XML ####
+
+  # Save raw XML output to file
+  writeLines(theData, outfile, useBytes = TRUE)
+
+  # Reload XML as a single text string
+  theData <- readChar(outfile, file.info(outfile)$size)
+
+  # Remove duplicate XML headers and root tags
+  theData <- gsub(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "",
+    theData,
+    fixed = TRUE,
+    useBytes = TRUE
+  )
+
+  theData <- gsub(
+    "<search-results.+?>",
+    "",
+    theData,
+    useBytes = TRUE
+  )
+
+  theData <- gsub(
+    "</search-results>",
+    "",
+    theData,
+    fixed = TRUE
+  )
+
+  # Add single valid XML header and root node
+  theData <- paste(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<search-results xmlns=\"http://www.w3.org/2005/Atom\" xmlns:cto=\"http://www.elsevier.com/xml/cto/dtd\" xmlns:atom=\"http://www.w3.org/2005/Atom\" xmlns:prism=\"http://prismstandard.org/namespaces/basic/2.0/\" xmlns:opensearch=\"http://a9.com/-/spec/opensearch/1.1/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">",
+    theData,
+    "</search-results>",
+    sep = "\n"
+  )
+
+  # Save cleaned XML output
+  writeLines(theData, outfile, useBytes = TRUE)
+
+  print("Done")
+
+  # Return XML text
+  return(theData)
+}
+
+#### Function to Search Scopus by Identifier ####
+
+# Search Scopus using PMID, DOI, or EID identifiers
+searchByID <- function(theIDs,
+                       idtype,
+                       datatype = "application/xml",
+                       content = "complete",
+                       myStart = 0,
+                       retCount = 25,
+                       outfile) {
+
+  # Add your Scopus API key
+  key <- "SCOPUS API KEY HERE"
+
+  # Read IDs from file if a single filename is supplied
+  if (length(theIDs) == 1) {
+
+    theIDs <- unique(
+      scan(theIDs, what = "varchar")
+    )
+
+  } else {
+
+    # Ensure IDs are unique character values
+    theIDs <- unique(as.character(theIDs))
+  }
+
+  # Count number of requested records
+  resultCount <- as.numeric(length(theIDs))
+
+  # Split IDs into groups of 25 for API requests
+  idList <- split(
+    theIDs,
+    ceiling(seq_along(theIDs) / 25)
+  )
+
+  # Initialize XML storage
+  theData <- " "
+
+  # Initialize retrieval counter
+  retrievedCount <- 0
+
+  #### Format Identifier Queries ####
+
+  # Build search strings based on identifier type
+  if (idtype == "pmid") {
+
+    idList <- lapply(
+      mapply(paste, "PMID(", idList, collapse = ") OR "),
+      paste,
+      ")"
+    )
+
+  } else if (idtype == "doi") {
+
+    idList <- lapply(
+      mapply(paste, "DOI(", idList, collapse = ") OR "),
+      paste,
+      ")"
+    )
+
+  } else if (idtype == "eid") {
+
+    idList <- lapply(
+      mapply(paste, "EID(", idList, collapse = ") OR "),
+      paste,
+      ")"
+    )
+
+  } else {
+
+    stop("Invalid idtype. Valid idtypes are 'pmid', 'doi', or 'eid'")
+  }
+
+  print(paste("Retrieving", resultCount, "records."))
+
+  #### Retrieve Records ####
+
+  # Loop through batches of IDs
+  for (i in 1:length(idList)) {
+
+    string <- idList[i]
+
+    # Submit API request
+    theURL <- httr::GET(
+      "https://api.elsevier.com/content/search/scopus",
+      query = list(
+        apiKey = key,
+        query = string,
+        httpAccept = "application/xml",
+        view = content,
+        count = retCount,
+        start = myStart
+      )
+    )
+
+    # Append XML response to existing data
+    theData <- paste(
+      theData,
+      httr::content(theURL, as = "text")
+    )
+
+    # Check for HTTP errors
+    if (httr::http_error(theURL) == TRUE) {
+
+      print("Encountered an HTTP error. Details follow.")
+      print(httr::http_status(theURL))
+
+      break
+    }
+
+    # Pause between API requests
+    Sys.sleep(1)
+
+    # Update retrieval count
+    retrievedCount <- retrievedCount + retCount
+
+    print(
+      paste(
+        "Retrieved",
+        retrievedCount,
+        "of",
+        resultCount,
+        "records. Getting more."
+      )
+    )
+  }
+
+  print(
+    paste(
+      "Retrieved",
+      retrievedCount,
+      "records. Formatting and saving results."
+    )
+  )
+
+  #### Format and Save XML ####
+
+  # Save XML output
+  writeLines(theData, outfile, useBytes = TRUE)
+
+  # Reload XML as a single string
+  theData <- readChar(outfile, file.info(outfile)$size)
+
+  # Remove repeated XML headers and root tags
+  theData <- gsub(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "",
+    theData,
+    fixed = TRUE,
+    useBytes = TRUE
+  )
+
+  theData <- gsub(
+    "<search-results.+?>",
+    "",
+    theData,
+    useBytes = TRUE
+  )
+
+  theData <- gsub(
+    "</search-results>",
+    "",
+    theData,
+    fixed = TRUE
+  )
+
+  # Add valid XML wrapper
+  theData <- paste(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<search-results xmlns=\"http://www.w3.org/2005/Atom\" xmlns:cto=\"http://www.elsevier.com/xml/cto/dtd\" xmlns:atom=\"http://www.w3.org/2005/Atom\" xmlns:prism=\"http://prismstandard.org/namespaces/basic/2.0/\" xmlns:opensearch=\"http://a9.com/-/spec/opensearch/1.1/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">",
+    theData,
+    "</search-results>",
+    sep = "\n"
+  )
+
+  # Save cleaned XML
+  writeLines(theData, outfile, useBytes = TRUE)
+
+  print("Done")
+
+  # Return XML text
+  return(theData)
+}
+
+#### Function to Extract XML Data ####
+
+# Extract bibliographic metadata from Scopus XML records
+extractXML <- function(theFile) {
+
+  # Parse XML file
+  newData <- XML::xmlParse(theFile)
+
+  # Retrieve all publication records
+  records <- XML::getNodeSet(
+    newData,
+    "//cto:entry",
+    namespaces = "cto"
+  )
+
+  #### Extract Identifier Information ####
+
+  # Extract Scopus EIDs
+  scopusID <- lapply(
+    records,
+    XML::xpathSApply,
+    "./cto:eid",
+    XML::xmlValue,
+    namespaces = "cto"
+  )
+
+  scopusID[sapply(scopusID, is.list)] <- NA
+  scopusID <- unlist(scopusID)
+
+  # Extract DOI values
+  doi <- lapply(
+    records,
+    XML::xpathSApply,
+    "./prism:doi",
+    XML::xmlValue,
+    namespaces = c(
+      prism = "http://prismstandard.org/namespaces/basic/2.0/"
+    )
+  )
+
+  doi[sapply(doi, is.list)] <- NA
+  doi <- unlist(doi)
+
+  # Extract PubMed IDs
+  pmid <- lapply(
+    records,
+    XML::xpathSApply,
+    "./cto:pubmed-id",
+    XML::xmlValue,
+    namespaces = "cto"
+  )
+
+  pmid[sapply(pmid, is.list)] <- NA
+  pmid <- unlist(pmid)
+
+  #### Extract Author Information ####
+
+  # Extract author surnames
+  authLast <- lapply(
+    records,
+    XML::xpathSApply,
+    ".//cto:surname",
+    XML::xmlValue,
+    namespaces = "cto"
+  )
+
+  authLast[sapply(authLast, is.list)] <- NA
+
+  # Extract author initials
+  authInit <- lapply(
+    records,
+    XML::xpathSApply,
+    ".//cto:initials",
+    XML::xmlValue,
+    namespaces = "cto"
+  )
+
+  authInit[sapply(authInit, is.list)] <- NA
+
+  # Combine surnames and initials
+  authors <- mapply(
+    paste,
+    authLast,
+    authInit,
+    collapse = "|"
+  )
+
+  # Remove duplicate author names
+  authors <- sapply(
+    strsplit(authors, "|", fixed = TRUE),
+    unique
+  )
+
+  authors <- sapply(authors, paste, collapse = "|")
+
+  #### Extract Affiliation Information ####
+
+  # Extract affiliations
+  affiliations <- lapply(
+    records,
+    XML::xpathSApply,
+    ".//cto:affilname",
+    XML::xmlValue,
+    namespaces = "cto"
+  )
+
+  affiliations[sapply(affiliations, is.list)] <- NA
+
+  affiliations <- sapply(
+    affiliations,
+    paste,
+    collapse = "|"
+  )
+
+  affiliations <- sapply(
+    strsplit(affiliations, "|", fixed = TRUE),
+    unique
+  )
+
+  affiliations <- sapply(
+    affiliations,
+    paste,
+    collapse = "|"
+  )
+
+  # Extract affiliation countries
+  countries <- lapply(
+    records,
+    XML::xpathSApply,
+    ".//cto:affiliation-country",
+    XML::xmlValue,
+    namespaces = "cto"
+  )
+
+  countries[sapply(countries, is.list)] <- NA
+
+  countries <- sapply(
+    countries,
+    paste,
+    collapse = "|"
+  )
+
+  countries <- sapply(
+    strsplit(countries, "|", fixed = TRUE),
+    unique
+  )
+
+  countries <- sapply(
+    countries,
+    paste,
+    collapse = "|"
+  )
+
+  #### Extract Publication Information ####
+
+  # Extract publication year
+  year <- lapply(
+    records,
+    XML::xpathSApply,
+    "./prism:coverDate",
+    XML::xmlValue,
+    namespaces = c(
+      prism = "http://prismstandard.org/namespaces/basic/2.0/"
+    )
+  )
+
+  year[sapply(year, is.list)] <- NA
+  year <- unlist(year)
+
+  # Keep only year value
+  year <- gsub("\\-..", "", year)
+
+  # Extract article titles
+  articletitle <- lapply(
+    records,
+    XML::xpathSApply,
+    "./dc:title",
+    XML::xmlValue,
+    namespaces = c(
+      dc = "http://purl.org/dc/elements/1.1/"
+    )
+  )
+
+  articletitle[sapply(articletitle, is.list)] <- NA
+  articletitle <- unlist(articletitle)
+
+  # Extract journal titles
+  journal <- lapply(
+    records,
+    XML::xpathSApply,
+    "./prism:publicationName",
+    XML::xmlValue,
+    namespaces = c(
+      prism = "http://prismstandard.org/namespaces/basic/2.0/"
+    )
+  )
+
+  journal[sapply(journal, is.list)] <- NA
+  journal <- unlist(journal)
+
+  # Extract volume numbers
+  volume <- lapply(
+    records,
+    XML::xpathSApply,
+    "./prism:volume",
+    XML::xmlValue,
+    namespaces = c(
+      prism = "http://prismstandard.org/namespaces/basic/2.0/"
+    )
+  )
+
+  volume[sapply(volume, is.list)] <- NA
+  volume <- unlist(volume)
+
+  # Extract issue numbers
+  issue <- lapply(
+    records,
+    XML::xpathSApply,
+    "./prism:issueIdentifier",
+    XML::xmlValue,
+    namespaces = c(
+      prism = "http://prismstandard.org/namespaces/basic/2.0/"
+    )
+  )
+
+  issue[sapply(issue, is.list)] <- NA
+  issue <- unlist(issue)
+
+  # Extract page ranges
+  pages <- lapply(
+    records,
+    XML::xpathSApply,
+    "./prism:pageRange",
+    XML::xmlValue,
+    namespaces = c(
+      prism = "http://prismstandard.org/namespaces/basic/2.0/"
+    )
+  )
+
+  pages[sapply(pages, is.list)] <- NA
+  pages <- unlist(pages)
+
+  #### Extract Additional Metadata ####
+
+  # Extract abstracts
+  abstract <- lapply(
+    records,
+    XML::xpathSApply,
+    "./dc:description",
+    XML::xmlValue,
+    namespaces = c(
+      dc = "http://purl.org/dc/elements/1.1/"
+    )
+  )
+
+  abstract[sapply(abstract, is.list)] <- NA
+  abstract <- unlist(abstract)
+
+  # Extract author keywords
+  keywords <- lapply(
+    records,
+    XML::xpathSApply,
+    "./cto:authkeywords",
+    XML::xmlValue,
+    namespaces = "cto"
+  )
+
+  keywords[sapply(keywords, is.list)] <- NA
+  keywords <- unlist(keywords)
+
+  # Replace spaces around separators
+  keywords <- gsub(" | ", "|", keywords, fixed = TRUE)
+
+  # Extract publication type
+  ptype <- lapply(
+    records,
+    XML::xpathSApply,
+    "./cto:subtypeDescription",
+    XML::xmlValue,
+    namespaces = "cto"
+  )
+
+  ptype[sapply(ptype, is.list)] <- NA
+  ptype <- unlist(ptype)
+
+  # Extract citation counts
+  timescited <- lapply(
+    records,
+    XML::xpathSApply,
+    "./cto:citedby-count",
+    XML::xmlValue,
+    namespaces = "cto"
+  )
+
+  timescited[sapply(timescited, is.list)] <- NA
+  timescited <- unlist(timescited)
+
+  #### Create Final Data Frame ####
+
+  # Combine extracted variables into a data frame
+  theDF <- data.frame(
+    scopusID,
+    doi,
+    pmid,
+    authors,
+    affiliations,
+    countries,
+    year,
+    articletitle,
+    journal,
+    volume,
+    issue,
+    pages,
+    keywords,
+    abstract,
+    ptype,
+    timescited,
+    stringsAsFactors = FALSE
+  )
+
+  # Return final data frame
+  return(theDF)
+}
